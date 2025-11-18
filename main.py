@@ -8,6 +8,9 @@ import os
 import json
 import time
 import base64
+import hashlib
+import hmac
+import uuid
 import requests
 import schedule
 from datetime import datetime
@@ -93,7 +96,7 @@ class WorkersDatabase:
 
 
 class HikCentralAPI:
-    """HikCentral API Client"""
+    """HikCentral API Client with proper AK/SK authentication"""
     
     def __init__(self):
         self.base_url = HIKCENTRAL_BASE_URL
@@ -101,28 +104,84 @@ class HikCentralAPI:
         self.app_secret = HIKCENTRAL_APP_SECRET
         self.privilege_group_id = HIKCENTRAL_PRIVILEGE_GROUP_ID
     
-    def _get_headers(self) -> Dict[str, str]:
+    def _calculate_signature(self, method: str, accept: str, content_type: str, 
+                           uri: str, body: str, timestamp: str) -> str:
+        """Calculate signature for HikCentral API"""
+        
+        # Calculate Content-MD5
+        content_md5 = ""
+        if body:
+            md5_hash = hashlib.md5(body.encode('utf-8')).digest()
+            content_md5 = base64.b64encode(md5_hash).decode('utf-8')
+        
+        # Build signature string
+        signature_parts = [
+            method,
+            accept,
+            content_md5,
+            content_type,
+            "",  # Date (optional)
+            f"x-ca-key:{self.app_key}",
+            f"x-ca-timestamp:{timestamp}",
+            uri
+        ]
+        
+        string_to_sign = "\n".join(signature_parts)
+        
+        # Calculate signature using HmacSHA256
+        signature_bytes = hmac.new(
+            self.app_secret.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        
+        signature = base64.b64encode(signature_bytes).decode('utf-8')
+        
+        return signature, content_md5
+    
+    def _get_headers(self, endpoint: str, body: str) -> Dict[str, str]:
         """Generate headers with AK/SK authentication"""
-        return {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'X-Ca-Key': self.app_key
+        method = "POST"
+        accept = "application/json"
+        content_type = "application/json"
+        timestamp = str(int(time.time() * 1000))
+        
+        # Calculate signature
+        signature, content_md5 = self._calculate_signature(
+            method, accept, content_type, endpoint, body, timestamp
+        )
+        
+        headers = {
+            'Accept': accept,
+            'Content-Type': content_type,
+            'X-Ca-Key': self.app_key,
+            'X-Ca-Signature': signature,
+            'X-Ca-Signature-Headers': 'x-ca-key,x-ca-timestamp',
+            'X-Ca-Timestamp': timestamp
         }
+        
+        if content_md5:
+            headers['Content-MD5'] = content_md5
+        
+        return headers
     
     def _make_request(self, endpoint: str, data: Dict) -> Dict:
         """Make authenticated request to HikCentral"""
         url = f"{self.base_url}{endpoint}"
         
-        # Add appSecret to request body
-        data['appSecret'] = self.app_secret
+        # Convert data to JSON string
+        body = json.dumps(data)
+        
+        # Get headers with signature
+        headers = self._get_headers(endpoint, body)
         
         print(f"[HikCentral] POST {endpoint}")
         
         try:
             response = requests.post(
                 url,
-                json=data,
-                headers=self._get_headers(),
+                data=body,
+                headers=headers,
                 verify=VERIFY_SSL,
                 timeout=30
             )
