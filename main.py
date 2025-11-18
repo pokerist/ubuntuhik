@@ -105,15 +105,15 @@ class HikCentralAPI:
         """Generate headers with AK/SK authentication"""
         return {
             'Content-Type': 'application/json',
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'X-Ca-Key': self.app_key
         }
     
     def _make_request(self, endpoint: str, data: Dict) -> Dict:
         """Make authenticated request to HikCentral"""
         url = f"{self.base_url}{endpoint}"
         
-        # Add authentication parameters to data
-        data['appKey'] = self.app_key
+        # Add appSecret to request body
         data['appSecret'] = self.app_secret
         
         print(f"[HikCentral] POST {endpoint}")
