@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-HydePark Local Server - Face Recognition Sync System
-Syncs workers from Supabase API to HikCentral with face duplicate detection
+HydePark Local Server - Simple Sync System
+Syncs workers from Supabase API to HikCentral (No Face Recognition)
 """
 
 import os
 import json
 import time
 import base64
-import hashlib
 import requests
 import schedule
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
-import face_recognition
-from PIL import Image
-import numpy as np
 import urllib3
 
 # Disable SSL warnings for self-signed certificates
@@ -34,7 +30,6 @@ HIKCENTRAL_BASE_URL = os.getenv('HIKCENTRAL_BASE_URL')
 HIKCENTRAL_APP_KEY = os.getenv('HIKCENTRAL_APP_KEY')
 HIKCENTRAL_APP_SECRET = os.getenv('HIKCENTRAL_APP_SECRET')
 HIKCENTRAL_PRIVILEGE_GROUP_ID = os.getenv('HIKCENTRAL_PRIVILEGE_GROUP_ID', '3')
-FACE_MATCH_THRESHOLD = float(os.getenv('FACE_MATCH_THRESHOLD', '0.6'))
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'False').lower() == 'true'
 
@@ -62,7 +57,7 @@ class WorkersDatabase:
         if self.file_path.exists():
             with open(self.file_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        return {'workers': [], 'face_encodings': {}}
+        return {'workers': []}
     
     def save(self):
         with open(self.file_path, 'w', encoding='utf-8') as f:
@@ -92,13 +87,9 @@ class WorkersDatabase:
                 return worker
         return None
     
-    def add_face_encoding(self, worker_id: str, encoding: List[float]):
-        # Convert numpy array to list for JSON serialization
-        self.data['face_encodings'][worker_id] = encoding
-        self.save()
-    
-    def get_all_face_encodings(self) -> Dict[str, List[float]]:
-        return self.data['face_encodings']
+    def is_worker_processed(self, worker_id: str) -> bool:
+        """Check if worker was already processed"""
+        return self.get_worker_by_id(worker_id) is not None
 
 
 class HikCentralAPI:
@@ -151,10 +142,15 @@ class HikCentralAPI:
     
     def add_person(self, worker: Dict, face_base64: str) -> Optional[str]:
         """Add person to HikCentral"""
+        # Split name properly
+        name_parts = worker['fullName'].strip().split()
+        family_name = name_parts[-1] if name_parts else "Unknown"
+        given_name = " ".join(name_parts[:-1]) if len(name_parts) > 1 else "Unknown"
+        
         data = {
             "personCode": worker['nationalIdNumber'],
-            "personFamilyName": worker['fullName'].split()[-1] if worker['fullName'] else "Unknown",
-            "personGivenName": " ".join(worker['fullName'].split()[:-1]) if worker['fullName'] else "Unknown",
+            "personFamilyName": family_name,
+            "personGivenName": given_name,
             "gender": 1,
             "orgIndexCode": "1",
             "remark": f"Added via HydePark Sync - {worker.get('unitNumber', 'N/A')}",
@@ -197,30 +193,8 @@ class HikCentralAPI:
         result = self._make_request('/api/acs/v1/privilege/group/single/addPersons', data)
         return result.get('code') == '0'
     
-    def update_person(self, person_id: str, worker: Dict, face_base64: str) -> bool:
-        """Update person in HikCentral"""
-        data = {
-            "personId": person_id,
-            "personCode": worker['nationalIdNumber'],
-            "personFamilyName": worker['fullName'].split()[-1] if worker['fullName'] else "Unknown",
-            "personGivenName": " ".join(worker['fullName'].split()[:-1]) if worker['fullName'] else "Unknown",
-            "orgIndexCode": "1",
-            "gender": 1,
-            "phoneNo": worker.get('delegatedUserMobile', ''),
-            "remark": f"Updated via HydePark Sync - {worker.get('unitNumber', 'N/A')}",
-            "email": worker.get('delegatedUserEmail', ''),
-            "beginTime": worker.get('validFrom', '2025-01-01') + 'T00:00:00+02:00',
-            "endTime": worker.get('validTo', '2035-12-31') + 'T23:59:59+02:00',
-            "residentRoomNo": 0,
-            "residentFloorNo": 0
-        }
-        
-        result = self._make_request('/api/resource/v1/person/single/update', data)
-        return result.get('code') == '0'
-    
     def delete_person(self, person_id: str) -> bool:
-        """Delete person from HikCentral"""
-        # First remove from privilege group
+        """Remove person from HikCentral privilege group"""
         remove_data = {
             "privilegeGroupId": self.privilege_group_id,
             "type": 1,
@@ -232,9 +206,6 @@ class HikCentralAPI:
         }
         
         self._make_request('/api/acs/v1/privilege/group/single/deletePersons', remove_data)
-        
-        # Note: Actual person deletion endpoint might be different
-        # This is a placeholder - check HikCentral docs for correct endpoint
         print(f"[HikCentral] Person {person_id} removed from privilege group")
         return True
 
@@ -323,14 +294,11 @@ class SupabaseAPI:
             return False
 
 
-class FaceRecognitionSystem:
-    """Face recognition and duplicate detection"""
+class ImageDownloader:
+    """Simple image downloader"""
     
-    def __init__(self, db: WorkersDatabase):
-        self.db = db
-        self.threshold = FACE_MATCH_THRESHOLD
-    
-    def download_image(self, url: str, save_path: Path) -> bool:
+    @staticmethod
+    def download_image(url: str, save_path: Path) -> bool:
         """Download image from URL"""
         try:
             print(f"[Image] Downloading from {url[:50]}...")
@@ -347,51 +315,11 @@ class FaceRecognitionSystem:
             print(f"[Image] Download failed: {e}")
             return False
     
-    def image_to_base64(self, image_path: Path) -> str:
+    @staticmethod
+    def image_to_base64(image_path: Path) -> str:
         """Convert image to base64"""
         with open(image_path, 'rb') as f:
             return base64.b64encode(f.read()).decode('utf-8')
-    
-    def get_face_encoding(self, image_path: Path) -> Optional[np.ndarray]:
-        """Get face encoding from image"""
-        try:
-            image = face_recognition.load_image_file(str(image_path))
-            encodings = face_recognition.face_encodings(image)
-            
-            if encodings:
-                print(f"[Face] Face detected in {image_path.name}")
-                return encodings[0]
-            
-            print(f"[Face] No face detected in {image_path.name}")
-            return None
-            
-        except Exception as e:
-            print(f"[Face] Error processing {image_path.name}: {e}")
-            return None
-    
-    def find_face_match(self, face_encoding: np.ndarray) -> Optional[Tuple[str, float]]:
-        """Find matching face in database"""
-        all_encodings = self.db.get_all_face_encodings()
-        
-        if not all_encodings:
-            return None
-        
-        print(f"[Face] Comparing with {len(all_encodings)} existing faces...")
-        
-        for worker_id, stored_encoding in all_encodings.items():
-            # Convert list back to numpy array
-            stored_array = np.array(stored_encoding)
-            
-            # Calculate face distance
-            distance = face_recognition.face_distance([stored_array], face_encoding)[0]
-            similarity = 1 - distance
-            
-            if similarity >= self.threshold:
-                print(f"[Face] Match found! Worker ID: {worker_id}, Similarity: {similarity:.2%}")
-                return (worker_id, similarity)
-        
-        print(f"[Face] No match found (threshold: {self.threshold:.2%})")
-        return None
 
 
 class SyncController:
@@ -401,7 +329,7 @@ class SyncController:
         self.db = WorkersDatabase(DATA_FILE)
         self.supabase = SupabaseAPI()
         self.hikcentral = HikCentralAPI()
-        self.face_system = FaceRecognitionSystem(self.db)
+        self.downloader = ImageDownloader()
     
     def process_worker(self, worker: Dict):
         """Process a single worker"""
@@ -416,11 +344,14 @@ class SyncController:
         print(f"[Worker] Status: {status}, Blocked: {blocked}")
         print(f"{'='*60}")
         
-        # Check if worker already in local database
-        existing = self.db.get_worker_by_national_id(national_id)
+        # Check if already processed
+        if self.db.is_worker_processed(worker_id):
+            print(f"[Worker] Already processed - skipping")
+            return
         
         # Handle blocked workers
         if blocked:
+            existing = self.db.get_worker_by_national_id(national_id)
             if existing and existing.get('hikcentral_id'):
                 print(f"[Worker] Blocked worker - removing from HikCentral")
                 self.hikcentral.delete_person(existing['hikcentral_id'])
@@ -434,64 +365,19 @@ class SyncController:
         face_path = FACES_DIR / f"{worker_id}_face.jpg"
         id_card_path = ID_CARDS_DIR / f"{worker_id}_id.jpg"
         
-        if not self.face_system.download_image(worker['facePhoto'], face_path):
+        if not self.downloader.download_image(worker['facePhoto'], face_path):
             print(f"[Worker] Failed to download face photo - skipping")
             return
         
-        if not self.face_system.download_image(worker['nationalIdImage'], id_card_path):
+        if not self.downloader.download_image(worker['nationalIdImage'], id_card_path):
             print(f"[Worker] Failed to download ID card - skipping")
             return
         
-        # Get face encoding
-        face_encoding = self.face_system.get_face_encoding(face_path)
+        # Convert face image to base64
+        face_base64 = self.downloader.image_to_base64(face_path)
         
-        if face_encoding is None:
-            print(f"[Worker] No face detected - marking as blocked")
-            self.supabase.update_worker_status(
-                worker_id,
-                'blocked',
-                blocked_reason='لم يتم اكتشاف وجه في الصورة'
-            )
-            return
-        
-        # Check for duplicate faces
-        match = self.face_system.find_face_match(face_encoding)
-        
-        if match:
-            matched_worker_id, similarity = match
-            matched_worker = self.db.get_worker_by_id(matched_worker_id)
-            
-            if matched_worker and matched_worker.get('blocked'):
-                print(f"[Worker] Duplicate of blocked worker - rejecting")
-                self.supabase.update_worker_status(
-                    worker_id,
-                    'blocked',
-                    blocked_reason=f'تطابق مع عامل محظور سابقاً: {matched_worker.get("fullName")}'
-                )
-                return
-            
-            # Update existing worker in HikCentral
-            if matched_worker and matched_worker.get('hikcentral_id'):
-                print(f"[Worker] Updating existing worker in HikCentral")
-                face_base64 = self.face_system.image_to_base64(face_path)
-                
-                if self.hikcentral.update_person(matched_worker['hikcentral_id'], worker, face_base64):
-                    self.db.update_worker(worker_id, {
-                        'hikcentral_id': matched_worker['hikcentral_id'],
-                        'updated_at': datetime.now().isoformat()
-                    })
-                    
-                    self.supabase.update_worker_status(
-                        worker_id,
-                        'approved',
-                        external_id=matched_worker['hikcentral_id']
-                    )
-                return
-        
-        # New worker - add to HikCentral
-        print(f"[Worker] New worker - adding to HikCentral")
-        face_base64 = self.face_system.image_to_base64(face_path)
-        
+        # Add to HikCentral
+        print(f"[Worker] Adding to HikCentral...")
         person_id = self.hikcentral.add_person(worker, face_base64)
         
         if person_id:
@@ -513,7 +399,6 @@ class SyncController:
             }
             
             self.db.add_worker(worker_data)
-            self.db.add_face_encoding(worker_id, face_encoding.tolist())
             
             # Update online status
             self.supabase.update_worker_status(
@@ -561,8 +446,8 @@ def main():
     """Main entry point"""
     print("""
     ╔════════════════════════════════════════════════════════════╗
-    ║         HydePark Local Server - Face Recognition           ║
-    ║              Sync System for HikCentral                    ║
+    ║         HydePark Local Server - Simple Sync                ║
+    ║              Auto-Add Workers to HikCentral                ║
     ╚════════════════════════════════════════════════════════════╝
     """)
     
@@ -573,7 +458,6 @@ def main():
     
     print(f"[Config] Supabase URL: {SUPABASE_URL[:50]}...")
     print(f"[Config] HikCentral URL: {HIKCENTRAL_BASE_URL}")
-    print(f"[Config] Face Match Threshold: {FACE_MATCH_THRESHOLD:.0%}")
     print(f"[Config] Sync Interval: {SYNC_INTERVAL} seconds")
     print(f"[Config] SSL Verification: {VERIFY_SSL}")
     print()
