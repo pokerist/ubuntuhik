@@ -104,60 +104,77 @@ class HikCentralAPI:
         self.app_secret = HIKCENTRAL_APP_SECRET
         self.privilege_group_id = HIKCENTRAL_PRIVILEGE_GROUP_ID
     
-    def _calculate_signature(self, method: str, accept: str, content_type: str, 
-                           uri: str, body: str, timestamp: str) -> str:
-        """Calculate signature for HikCentral API"""
-        
-        # Calculate Content-MD5
+    def _calculate_signature(self, method: str, accept: str, content_type: str,
+                             uri: str, body: str, timestamp: str, nonce: str) -> tuple:
+        """Calculate signature for HikCentral API.
+
+        Builds the string-to-sign per documentation. Order matters:
+        - HTTP method
+        - Accept
+        - (optional) Content-MD5 if body exists
+        - Content-Type
+        - x-ca-key:{app_key}
+        - x-ca-nonce:{nonce}
+        - x-ca-timestamp:{timestamp}
+        - request URI (path)
+        """
+
+        # Calculate Content-MD5 if body is present
         content_md5 = ""
         if body:
             md5_hash = hashlib.md5(body.encode('utf-8')).digest()
             content_md5 = base64.b64encode(md5_hash).decode('utf-8')
-        
-        # Build signature string
-        signature_parts = [
-            method,
-            accept,
-            content_md5,
-            content_type,
-            "",  # Date (optional)
-            f"x-ca-key:{self.app_key}",
-            f"x-ca-timestamp:{timestamp}",
-            uri
-        ]
-        
-        string_to_sign = "\n".join(signature_parts)
-        
+
+        # Build signature string according to documentation
+        parts = [method, accept]
+        if content_md5:
+            parts.append(content_md5)
+        parts.append(content_type)
+        parts.append(f"x-ca-key:{self.app_key}")
+        parts.append(f"x-ca-nonce:{nonce}")
+        parts.append(f"x-ca-timestamp:{timestamp}")
+        parts.append(uri)
+
+        string_to_sign = "\n".join(parts)
+
+        # Debug: show the string to sign (helpful when fixing signature issues)
+        # print("[HikCentral] StringToSign:\n" + string_to_sign)
+
         # Calculate signature using HmacSHA256
         signature_bytes = hmac.new(
             self.app_secret.encode('utf-8'),
             string_to_sign.encode('utf-8'),
             hashlib.sha256
         ).digest()
-        
+
         signature = base64.b64encode(signature_bytes).decode('utf-8')
-        
+
         return signature, content_md5
     
     def _get_headers(self, endpoint: str, body: str) -> Dict[str, str]:
         """Generate headers with AK/SK authentication"""
         method = "POST"
         accept = "application/json"
-        content_type = "application/json"
+        # Use full content-type including charset (HikCentral examples use this)
+        content_type = "application/json;charset=UTF-8"
         timestamp = str(int(time.time() * 1000))
-        
+
+        # Generate a nonce (GUID) and include it in signature
+        nonce = str(uuid.uuid4())
+
         # Calculate signature
         signature, content_md5 = self._calculate_signature(
-            method, accept, content_type, endpoint, body, timestamp
+            method, accept, content_type, endpoint, body, timestamp, nonce
         )
-        
+
         headers = {
             'Accept': accept,
             'Content-Type': content_type,
-            'X-Ca-Key': self.app_key,
-            'X-Ca-Signature': signature,
-            'X-Ca-Signature-Headers': 'x-ca-key,x-ca-timestamp',
-            'X-Ca-Timestamp': timestamp
+            'x-ca-key': self.app_key,
+            'x-ca-nonce': nonce,
+            'x-ca-timestamp': timestamp,
+            'x-ca-signature-headers': 'x-ca-key,x-ca-nonce,x-ca-timestamp',
+            'x-ca-signature': signature
         }
         
         if content_md5:
