@@ -297,7 +297,6 @@ class HikCentralAPI:
             "personGivenName": given_name,
             "gender": 1,
             "orgIndexCode": org_code,
-            "remark": f"Added via HydePark Sync - {worker.get('unitNumber', 'N/A')}",
             "phoneNo": worker.get('delegatedUserMobile', ''),
             "email": worker.get('delegatedUserEmail', ''),
             "faces": [
