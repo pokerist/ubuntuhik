@@ -227,11 +227,11 @@ class HikCentralAPI:
     def _format_time(self, date_str: str, start: bool) -> str:
         try:
             if start:
-                return f"{date_str}T00:00:00.000{self.tz_offset}"
+                return f"{date_str}T00:00:00{self.tz_offset}"
             else:
-                return f"{date_str}T23:59:59.000{self.tz_offset}"
+                return f"{date_str}T23:59:59{self.tz_offset}"
         except Exception:
-            return f"2025-01-01T00:00:00.000{self.tz_offset}" if start else f"2035-12-31T23:59:59.000{self.tz_offset}"
+            return f"2025-01-01T00:00:00{self.tz_offset}" if start else f"2035-12-31T23:59:59{self.tz_offset}"
     
     def _make_request(self, endpoint: str, data: Dict) -> Dict:
         """Make authenticated request to HikCentral"""
@@ -309,8 +309,8 @@ class HikCentralAPI:
             "cards": [],
             "beginTime": self._format_time(begin_date, True),
             "endTime": self._format_time(end_date, False),
-            "residentRoomNo": 0,
-            "residentFloorNo": 0
+            "residentRoomNo": 1,
+            "residentFloorNo": 1
         }
         
         result = self._make_request('/api/resource/v1/person/single/add', data)
