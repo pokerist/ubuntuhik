@@ -35,6 +35,8 @@ HIKCENTRAL_APP_SECRET = os.getenv('HIKCENTRAL_APP_SECRET')
 HIKCENTRAL_PRIVILEGE_GROUP_ID = os.getenv('HIKCENTRAL_PRIVILEGE_GROUP_ID', '3')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'False').lower() == 'true'
+HIKCENTRAL_DEBUG = os.getenv('HIKCENTRAL_DEBUG', 'False').lower() == 'true'
+HIKCENTRAL_INCLUDE_PORT_IN_URI = os.getenv('HIKCENTRAL_INCLUDE_PORT_IN_URI', 'False').lower() == 'true'
 
 # Directories
 BASE_DIR = Path(__file__).parent
@@ -138,7 +140,9 @@ class HikCentralAPI:
         string_to_sign = "\n".join(parts)
 
         # Debug: show the string to sign (helpful when fixing signature issues)
-        # print("[HikCentral] StringToSign:\n" + string_to_sign)
+        if HIKCENTRAL_DEBUG:
+            print("[HikCentral] StringToSign:\n" + string_to_sign)
+
 
         # Calculate signature using HmacSHA256
         signature_bytes = hmac.new(
@@ -162,21 +166,36 @@ class HikCentralAPI:
         # Generate a nonce (GUID) and include it in signature
         nonce = str(uuid.uuid4())
 
+        # Build the URI used for signing. Depending on environment flag, include the
+        # base_url's path and optionally its port in the URI string used for signature.
+        from urllib.parse import urlparse
+        parsed = urlparse(self.base_url)
+        base_path = parsed.path.rstrip('/') if parsed.path else ''
+        port = parsed.port
+
+        if HIKCENTRAL_INCLUDE_PORT_IN_URI and port:
+            # e.g. '/artemis:443/api/resource/v1/person/single/add'
+            uri_for_sign = f"{base_path}:{port}{endpoint}"
+        else:
+            # e.g. '/artemis/api/resource/v1/person/single/add'
+            uri_for_sign = f"{base_path}{endpoint}"
+
         # Calculate signature
         signature, content_md5 = self._calculate_signature(
-            method, accept, content_type, endpoint, body, timestamp, nonce
+            method, accept, content_type, uri_for_sign, body, timestamp, nonce
         )
 
         headers = {
             'Accept': accept,
             'Content-Type': content_type,
-            'x-ca-key': self.app_key,
-            'x-ca-nonce': nonce,
-            'x-ca-timestamp': timestamp,
-            'x-ca-signature-headers': 'x-ca-key,x-ca-nonce,x-ca-timestamp',
-            'x-ca-signature': signature
+            'X-Ca-Key': self.app_key,
+            'X-Ca-Nonce': nonce,
+            'X-Ca-Timestamp': timestamp,
+            'X-Ca-Signature-Headers': 'x-ca-key,x-ca-nonce,x-ca-timestamp',
+            'X-Ca-Signature': signature
         }
         
+        # Include Content-MD5 header when body is present so server can validate it
         if content_md5:
             headers['Content-MD5'] = content_md5
         
@@ -185,9 +204,8 @@ class HikCentralAPI:
     def _make_request(self, endpoint: str, data: Dict) -> Dict:
         """Make authenticated request to HikCentral"""
         url = f"{self.base_url}{endpoint}"
-        
-        # Convert data to JSON string
-        body = json.dumps(data)
+        # Convert data to JSON string using canonical separators to ensure consistent MD5
+        body = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
         
         # Get headers with signature
         headers = self._get_headers(endpoint, body)
@@ -197,7 +215,7 @@ class HikCentralAPI:
         try:
             response = requests.post(
                 url,
-                data=body,
+                data=body.encode('utf-8'),
                 headers=headers,
                 verify=VERIFY_SSL,
                 timeout=30
