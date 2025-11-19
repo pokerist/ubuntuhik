@@ -209,8 +209,18 @@ class HikCentralAPI:
         
         # Get headers with signature
         headers = self._get_headers(endpoint, body)
-        
+
         print(f"[HikCentral] POST {endpoint}")
+        if HIKCENTRAL_DEBUG:
+            # Print headers and body for debugging parameter issues
+            try:
+                print('[HikCentral][DEBUG] Request headers:')
+                for k, v in headers.items():
+                    print(f"  {k}: {v}")
+                print('[HikCentral][DEBUG] Request body:')
+                print(body)
+            except Exception as _:
+                pass
         
         try:
             response = requests.post(
@@ -221,6 +231,11 @@ class HikCentralAPI:
                 timeout=30
             )
             response.raise_for_status()
+            # Always show raw response when debugging
+            if HIKCENTRAL_DEBUG:
+                print(f"[HikCentral][DEBUG] Response status: {response.status_code}")
+                print(f"[HikCentral][DEBUG] Response text: {response.text}")
+
             result = response.json()
             
             if result.get('code') == '0':
