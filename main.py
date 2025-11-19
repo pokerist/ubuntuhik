@@ -32,6 +32,7 @@ SUPABASE_API_KEY = os.getenv('SUPABASE_API_KEY')
 HIKCENTRAL_BASE_URL = os.getenv('HIKCENTRAL_BASE_URL')
 HIKCENTRAL_APP_KEY = os.getenv('HIKCENTRAL_APP_KEY')
 HIKCENTRAL_APP_SECRET = os.getenv('HIKCENTRAL_APP_SECRET')
+HIKCENTRAL_ORG_INDEX_CODE = os.getenv('HIKCENTRAL_ORG_INDEX_CODE')
 HIKCENTRAL_PRIVILEGE_GROUP_ID = os.getenv('HIKCENTRAL_PRIVILEGE_GROUP_ID', '3')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'False').lower() == 'true'
@@ -105,6 +106,7 @@ class HikCentralAPI:
         self.app_key = HIKCENTRAL_APP_KEY
         self.app_secret = HIKCENTRAL_APP_SECRET
         self.privilege_group_id = HIKCENTRAL_PRIVILEGE_GROUP_ID
+        self.org_index_code = HIKCENTRAL_ORG_INDEX_CODE
     
     def _calculate_signature(self, method: str, accept: str, content_type: str,
                              uri: str, body: str, timestamp: str, nonce: str) -> tuple:
@@ -256,26 +258,19 @@ class HikCentralAPI:
         family_name = name_parts[-1] if name_parts else "Unknown"
         given_name = " ".join(name_parts[:-1]) if len(name_parts) > 1 else "Unknown"
         
+        org_code = self.org_index_code or "1"
         data = {
             "personCode": worker['nationalIdNumber'],
+            "personName": worker['fullName'],
             "personFamilyName": family_name,
             "personGivenName": given_name,
             "gender": 1,
-            "orgIndexCode": "1",
+            "orgIndexCode": org_code,
             "remark": f"Added via HydePark Sync - {worker.get('unitNumber', 'N/A')}",
             "phoneNo": worker.get('delegatedUserMobile', ''),
             "email": worker.get('delegatedUserEmail', ''),
-            "faces": [
-                {
-                    "faceData": face_base64
-                }
-            ],
-            "fingerPrint": [],
-            "cards": [],
             "beginTime": worker.get('validFrom', '2025-01-01') + 'T00:00:00+02:00',
-            "endTime": worker.get('validTo', '2035-12-31') + 'T23:59:59+02:00',
-            "residentRoomNo": 0,
-            "residentFloorNo": 0
+            "endTime": worker.get('validTo', '2035-12-31') + 'T23:59:59+02:00'
         }
         
         result = self._make_request('/api/resource/v1/person/single/add', data)
@@ -284,6 +279,12 @@ class HikCentralAPI:
             person_id = result.get('data')
             print(f"[HikCentral] Person added with ID: {person_id}")
             return person_id
+        else:
+            try:
+                print("[HikCentral] Add person failed with payload:")
+                print(json.dumps(data, ensure_ascii=False))
+            except Exception:
+                pass
         
         return None
     
