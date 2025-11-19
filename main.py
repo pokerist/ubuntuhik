@@ -33,6 +33,8 @@ HIKCENTRAL_BASE_URL = os.getenv('HIKCENTRAL_BASE_URL')
 HIKCENTRAL_APP_KEY = os.getenv('HIKCENTRAL_APP_KEY')
 HIKCENTRAL_APP_SECRET = os.getenv('HIKCENTRAL_APP_SECRET')
 HIKCENTRAL_ORG_INDEX_CODE = os.getenv('HIKCENTRAL_ORG_INDEX_CODE')
+HIKCENTRAL_USER_ID = os.getenv('HIKCENTRAL_USER_ID', 'admin')
+HIKCENTRAL_TIMEZONE_OFFSET = os.getenv('HIKCENTRAL_TIMEZONE_OFFSET', '+02:00')
 HIKCENTRAL_PRIVILEGE_GROUP_ID = os.getenv('HIKCENTRAL_PRIVILEGE_GROUP_ID', '3')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'False').lower() == 'true'
@@ -107,6 +109,12 @@ class HikCentralAPI:
         self.app_secret = HIKCENTRAL_APP_SECRET
         self.privilege_group_id = HIKCENTRAL_PRIVILEGE_GROUP_ID
         self.org_index_code = HIKCENTRAL_ORG_INDEX_CODE
+        self.user_id = HIKCENTRAL_USER_ID
+        self.tz_offset = HIKCENTRAL_TIMEZONE_OFFSET
+        if not self.org_index_code:
+            resolved = self._resolve_org_index_code()
+            if resolved:
+                self.org_index_code = resolved
     
     def _calculate_signature(self, method: str, accept: str, content_type: str,
                              uri: str, body: str, timestamp: str, nonce: str) -> tuple:
@@ -194,7 +202,8 @@ class HikCentralAPI:
             'X-Ca-Nonce': nonce,
             'X-Ca-Timestamp': timestamp,
             'X-Ca-Signature-Headers': 'x-ca-key,x-ca-nonce,x-ca-timestamp',
-            'X-Ca-Signature': signature
+            'X-Ca-Signature': signature,
+            'userId': self.user_id
         }
         
         # Include Content-MD5 header when body is present so server can validate it
@@ -202,6 +211,27 @@ class HikCentralAPI:
             headers['Content-MD5'] = content_md5
         
         return headers
+    
+    def _resolve_org_index_code(self) -> Optional[str]:
+        try:
+            data = {"pageNo": 1, "pageSize": 1}
+            result = self._make_request('/api/resource/v1/org/brief/list', data)
+            if result.get('code') == '0':
+                items = result.get('data', {}).get('list', [])
+                if items:
+                    return items[0].get('indexCode')
+        except Exception:
+            pass
+        return None
+
+    def _format_time(self, date_str: str, start: bool) -> str:
+        try:
+            if start:
+                return f"{date_str}T00:00:00.000{self.tz_offset}"
+            else:
+                return f"{date_str}T23:59:59.000{self.tz_offset}"
+        except Exception:
+            return f"2025-01-01T00:00:00.000{self.tz_offset}" if start else f"2035-12-31T23:59:59.000{self.tz_offset}"
     
     def _make_request(self, endpoint: str, data: Dict) -> Dict:
         """Make authenticated request to HikCentral"""
@@ -259,19 +289,28 @@ class HikCentralAPI:
         given_name = " ".join(name_parts[:-1]) if len(name_parts) > 1 else "Unknown"
         
         org_code = self.org_index_code or "1"
+        begin_date = worker.get('validFrom', '2025-01-01')
+        end_date = worker.get('validTo', '2035-12-31')
         data = {
             "personCode": worker['nationalIdNumber'],
-            "personName": worker['fullName'],
             "personFamilyName": family_name,
             "personGivenName": given_name,
             "gender": 1,
             "orgIndexCode": org_code,
             "remark": f"Added via HydePark Sync - {worker.get('unitNumber', 'N/A')}",
+            "phoneNo": worker.get('delegatedUserMobile', ''),
+            "email": worker.get('delegatedUserEmail', ''),
             "faces": [
                 {
                     "faceData": face_base64
                 }
-            ]
+            ],
+            "fingerPrint": [],
+            "cards": [],
+            "beginTime": self._format_time(begin_date, True),
+            "endTime": self._format_time(end_date, False),
+            "residentRoomNo": 0,
+            "residentFloorNo": 0
         }
         
         result = self._make_request('/api/resource/v1/person/single/add', data)
