@@ -267,10 +267,11 @@ class HikCentralAPI:
             "gender": 1,
             "orgIndexCode": org_code,
             "remark": f"Added via HydePark Sync - {worker.get('unitNumber', 'N/A')}",
-            "phoneNo": worker.get('delegatedUserMobile', ''),
-            "email": worker.get('delegatedUserEmail', ''),
-            "beginTime": worker.get('validFrom', '2025-01-01') + 'T00:00:00+02:00',
-            "endTime": worker.get('validTo', '2035-12-31') + 'T23:59:59+02:00'
+            "faces": [
+                {
+                    "faceData": face_base64
+                }
+            ]
         }
         
         result = self._make_request('/api/resource/v1/person/single/add', data)
