@@ -94,6 +94,14 @@ class WorkersDatabase:
             if worker.get('nationalIdNumber') == national_id:
                 return worker
         return None
+
+    def update_worker_by_national_id(self, national_id: str, updates: Dict) -> bool:
+        for worker in self.data['workers']:
+            if worker.get('nationalIdNumber') == national_id:
+                worker.update(updates)
+                self.save()
+                return True
+        return False
     
     def is_worker_processed(self, worker_id: str) -> bool:
         """Check if worker was already processed"""
@@ -358,6 +366,32 @@ class HikCentralAPI:
         print(f"[HikCentral] Person {person_id} removed from privilege group")
         return True
 
+    def update_person(self, person_id: str, worker: Dict, begin_date: str, end_date: str) -> bool:
+        org_code = self.org_index_code or "1"
+        data = {
+            "personId": person_id,
+            "personCode": worker['nationalIdNumber'],
+            "personFamilyName": worker['fullName'].strip().split()[-1] if worker['fullName'].strip().split() else "",
+            "personGivenName": " ".join(worker['fullName'].strip().split()[:-1]) if len(worker['fullName'].strip().split()) > 1 else "",
+            "orgIndexCode": org_code,
+            "gender": 1,
+            "phoneNo": worker.get('delegatedUserMobile', ''),
+            "remark": "",
+            "email": worker.get('delegatedUserEmail', ''),
+            "cards": [],
+            "beginTime": self._format_time(begin_date, True),
+            "endTime": self._format_time(end_date, False),
+            "residentRoomNo": 1,
+            "residentFloorNo": 1
+        }
+        result = self._make_request('/api/resource/v1/person/single/update', data)
+        return result.get('code') == '0'
+
+    def delete_person_full(self, person_id: str) -> bool:
+        data = {"personId": person_id}
+        result = self._make_request('/api/resource/v1/person/single/delete', data)
+        return result.get('code') == '0'
+
 
 class SupabaseAPI:
     """Supabase API Client"""
@@ -493,22 +527,41 @@ class SyncController:
         print(f"[Worker] Status: {status}, Blocked: {blocked}")
         print(f"{'='*60}")
         
-        # Check if already processed
-        if self.db.is_worker_processed(worker_id):
-            print(f"[Worker] Already processed - skipping")
-            return
+        existing_by_nat = self.db.get_worker_by_national_id(national_id)
         
-        # Handle blocked workers
         if blocked:
-            existing = self.db.get_worker_by_national_id(national_id)
-            if existing and existing.get('hikcentral_id'):
-                print(f"[Worker] Blocked worker - removing from HikCentral")
-                self.hikcentral.delete_person(existing['hikcentral_id'])
-                self.db.update_worker(worker_id, {
+            if existing_by_nat:
+                if existing_by_nat.get('hikcentral_deleted'):
+                    self.db.update_worker_by_national_id(national_id, {
+                        'blocked': True,
+                        'blocked_at': datetime.now().isoformat()
+                    })
+                    self.supabase.update_worker_status(worker_id, 'blocked', external_id=existing_by_nat.get('hikcentral_id'))
+                    return
+                if existing_by_nat.get('hikcentral_id'):
+                    print(f"[Worker] Blocked worker - deleting from HikCentral")
+                    if self.hikcentral.delete_person_full(existing_by_nat['hikcentral_id']):
+                        self.db.update_worker_by_national_id(national_id, {
+                            'blocked': True,
+                            'blocked_at': datetime.now().isoformat(),
+                            'hikcentral_deleted': True
+                        })
+                        self.supabase.update_worker_status(worker_id, 'blocked', external_id=existing_by_nat['hikcentral_id'])
+                    return
+                self.db.update_worker_by_national_id(national_id, {
                     'blocked': True,
                     'blocked_at': datetime.now().isoformat()
+                }) or self.db.add_worker({
+                    'id': worker_id,
+                    'nationalIdNumber': national_id,
+                    'fullName': full_name,
+                    'status': 'blocked',
+                    'blocked': True,
+                    'hikcentral_deleted': False,
+                    'created_at': datetime.now().isoformat()
                 })
-            return
+                self.supabase.update_worker_status(worker_id, 'blocked')
+                return
         
         # Download images
         face_path = FACES_DIR / f"{worker_id}_face.jpg"
@@ -525,40 +578,56 @@ class SyncController:
         # Convert face image to base64
         face_base64 = self.downloader.image_to_base64(face_path)
         
-        # Add to HikCentral
+        # Add or update in HikCentral
         print(f"[Worker] Adding to HikCentral...")
-        person_id = self.hikcentral.add_person(worker, face_base64)
-        
-        if person_id:
-            # Add to privilege group
-            if self.hikcentral.add_to_privilege_group(person_id):
-                print(f"[Worker] Added to privilege group")
-            
-            # Save to local database
-            worker_data = {
-                'id': worker_id,
-                'nationalIdNumber': national_id,
-                'fullName': full_name,
-                'hikcentral_id': person_id,
-                'status': 'approved',
-                'blocked': False,
-                'face_path': str(face_path),
-                'id_card_path': str(id_card_path),
-                'created_at': datetime.now().isoformat()
-            }
-            
-            self.db.add_worker(worker_data)
-            
-            # Update online status
-            self.supabase.update_worker_status(
-                worker_id,
-                'approved',
-                external_id=person_id
-            )
-            
-            print(f"[Worker] ✓ Successfully processed")
+        if existing_by_nat and existing_by_nat.get('hikcentral_id'):
+            existing_begin = existing_by_nat.get('validFrom', worker.get('validFrom', '2025-01-01'))
+            existing_end = existing_by_nat.get('validTo', worker.get('validTo', '2035-12-31'))
+            incoming_begin = worker.get('validFrom', existing_begin)
+            incoming_end = worker.get('validTo', existing_end)
+            merged_begin = min(existing_begin, incoming_begin)
+            merged_end = max(existing_end, incoming_end)
+            print(f"[Worker] Updating in HikCentral...")
+            if self.hikcentral.update_person(existing_by_nat['hikcentral_id'], worker, merged_begin, merged_end):
+                self.db.update_worker_by_national_id(national_id, {
+                    'fullName': full_name,
+                    'status': 'approved',
+                    'blocked': False,
+                    'hikcentral_deleted': False,
+                    'face_path': str(face_path),
+                    'id_card_path': str(id_card_path),
+                    'validFrom': merged_begin,
+                    'validTo': merged_end,
+                    'updated_at': datetime.now().isoformat()
+                })
+                self.supabase.update_worker_status(worker_id, 'approved', external_id=existing_by_nat['hikcentral_id'])
+                print(f"[Worker] ✓ Successfully updated")
+            else:
+                print(f"[Worker] ✗ Failed to update in HikCentral")
         else:
-            print(f"[Worker] ✗ Failed to add to HikCentral")
+            person_id = self.hikcentral.add_person(worker, face_base64)
+            if person_id:
+                if self.hikcentral.add_to_privilege_group(person_id):
+                    print(f"[Worker] Added to privilege group")
+                worker_data = {
+                    'id': worker_id,
+                    'nationalIdNumber': national_id,
+                    'fullName': full_name,
+                    'hikcentral_id': person_id,
+                    'status': 'approved',
+                    'blocked': False,
+                    'hikcentral_deleted': False,
+                    'face_path': str(face_path),
+                    'id_card_path': str(id_card_path),
+                    'validFrom': worker.get('validFrom', '2025-01-01'),
+                    'validTo': worker.get('validTo', '2035-12-31'),
+                    'created_at': datetime.now().isoformat()
+                }
+                self.db.add_worker(worker_data)
+                self.supabase.update_worker_status(worker_id, 'approved', external_id=person_id)
+                print(f"[Worker] ✓ Successfully processed")
+            else:
+                print(f"[Worker] ✗ Failed to add to HikCentral")
     
     def sync(self):
         """Main sync function"""
