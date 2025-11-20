@@ -779,6 +779,19 @@ def main():
                         "</body></html>"
                     )
                     return self._send_html(html)
+                if self.path.startswith('/logs'):
+                    html = (
+                        "<!doctype html><html><head><meta charset='utf-8'>"
+                        "<title>HydePark Ops Logs</title>"
+                        "<style>body{font-family:sans-serif;margin:20px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:8px}th{background:#f5f5f5}code{background:#eee;padding:2px 4px;border-radius:3px}.fail{background:#ffecec}</style>"
+                        "</head><body>"
+                        "<h2>Operations Logs</h2>"
+                        "<div><button id='showFailed'>Show Failed Only</button> <button id='showAll'>Show All</button></div>"
+                        "<table id='logs'><thead><tr><th>Time</th><th>Op</th><th>Endpoint</th><th>NatID</th><th>Success</th><th>Code</th><th>Actions</th></tr></thead><tbody></tbody></table>"
+                        "<script>async function loadLogs(failed){const url=failed?'/api/logs?failed=true':'/api/logs';const logs=await fetch(url).then(r=>r.json());const tb=document.querySelector('#logs tbody');tb.innerHTML='';logs.forEach(l=>{const tr=document.createElement('tr');if(!l.success)tr.classList.add('fail');const code=(l.response&&l.response.code)||'';const nat=(l.context&&l.context.nationalIdNumber)||'';tr.innerHTML=`<td>${l.timestamp||''}</td><td>${(l.context&&l.context.op)||''}</td><td><code>${l.endpoint||''}</code></td><td>${nat}</td><td>${l.success?'Yes':'No'}</td><td>${code}</td><td><button onclick=\"alert(JSON.stringify(l.request,null,2))\">Request</button> <button onclick=\"alert(JSON.stringify(l.response,null,2))\">Response</button></td>`;tb.appendChild(tr);});}document.getElementById('showFailed').onclick=()=>loadLogs(true);document.getElementById('showAll').onclick=()=>loadLogs(false);loadLogs(false);setInterval(()=>loadLogs(false),10000);</script>"
+                        "</body></html>"
+                    )
+                    return self._send_html(html)
                 if self.path.startswith('/api/workers'):
                     data = dashboard_context['db'].data.get('workers', [])
                     return self._send_json(data)
