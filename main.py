@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 import urllib3
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Disable SSL warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -35,6 +37,8 @@ HIKCENTRAL_APP_SECRET = os.getenv('HIKCENTRAL_APP_SECRET')
 HIKCENTRAL_ORG_INDEX_CODE = os.getenv('HIKCENTRAL_ORG_INDEX_CODE')
 HIKCENTRAL_USER_ID = os.getenv('HIKCENTRAL_USER_ID', 'admin')
 HIKCENTRAL_TIMEZONE_OFFSET = os.getenv('HIKCENTRAL_TIMEZONE_OFFSET', '+02:00')
+DASHBOARD_ENABLED = os.getenv('DASHBOARD_ENABLED', 'True').lower() == 'true'
+DASHBOARD_PORT = int(os.getenv('DASHBOARD_PORT', '8080'))
 HIKCENTRAL_PRIVILEGE_GROUP_ID = os.getenv('HIKCENTRAL_PRIVILEGE_GROUP_ID', '3')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
 VERIFY_SSL = os.getenv('VERIFY_SSL', 'False').lower() == 'true'
@@ -513,6 +517,9 @@ class SyncController:
         self.supabase = SupabaseAPI()
         self.hikcentral = HikCentralAPI()
         self.downloader = ImageDownloader()
+        self.last_sync_started = None
+        self.last_sync_finished = None
+        self.last_sync_error = None
     
     def process_worker(self, worker: Dict):
         """Process a single worker"""
@@ -632,7 +639,8 @@ class SyncController:
     def sync(self):
         """Main sync function"""
         print(f"\n{'#'*60}")
-        print(f"# Sync started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.last_sync_started = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"# Sync started at {self.last_sync_started}")
         print(f"{'#'*60}\n")
         
         try:
@@ -652,9 +660,12 @@ class SyncController:
                     import traceback
                     traceback.print_exc()
             
-            print(f"\n[Sync] ✓ Sync completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self.last_sync_finished = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.last_sync_error = None
+            print(f"\n[Sync] ✓ Sync completed at {self.last_sync_finished}")
             
         except Exception as e:
+            self.last_sync_error = str(e)
             print(f"\n[Sync] ✗ Sync failed: {e}")
             import traceback
             traceback.print_exc()
@@ -682,6 +693,10 @@ def main():
     
     # Initialize sync controller
     controller = SyncController()
+    dashboard_context = {
+        'controller': controller,
+        'db': controller.db
+    }
     
     # Run first sync immediately
     print("[System] Running initial sync...")
@@ -692,6 +707,54 @@ def main():
     
     print(f"\n[System] Sync scheduler started (every {SYNC_INTERVAL} seconds)")
     print("[System] Press Ctrl+C to stop\n")
+    if DASHBOARD_ENABLED:
+        class DashboardHandler(BaseHTTPRequestHandler):
+            def _send_json(self, obj):
+                data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            def _send_html(self, html):
+                data = html.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            def do_GET(self):
+                if self.path == '/' or self.path.startswith('/index'):
+                    html = (
+                        "<!doctype html><html><head><meta charset='utf-8'>"
+                        "<title>HydePark Sync Dashboard</title>"
+                        "<style>body{font-family:sans-serif;margin:20px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:8px}th{background:#f5f5f5}code{background:#eee;padding:2px 4px;border-radius:3px}</style>"
+                        "</head><body>"
+                        "<h2>HydePark Sync Dashboard</h2>"
+                        "<div id='status'></div>"
+                        "<h3>Workers</h3>"
+                        "<table id='workers'><thead><tr><th>ID</th><th>National ID</th><th>Name</th><th>HikCentral ID</th><th>Status</th><th>Blocked</th><th>Valid From</th><th>Valid To</th></tr></thead><tbody></tbody></table>"
+                        "<script>async function load(){const s=await fetch('/api/status').then(r=>r.json());document.getElementById('status').innerHTML=`<p><b>Last Sync:</b> start: <code>${s.last_sync_started||'-'}</code>, finish: <code>${s.last_sync_finished||'-'}</code>, error: <code>${s.last_sync_error||'-'}</code></p>`;const w=await fetch('/api/workers').then(r=>r.json());const tb=document.querySelector('#workers tbody');tb.innerHTML='';w.forEach(x=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${x.id||''}</td><td>${x.nationalIdNumber||''}</td><td>${x.fullName||''}</td><td>${x.hikcentral_id||''}</td><td>${x.status||''}</td><td>${x.blocked?'Yes':'No'}</td><td>${x.validFrom||''}</td><td>${x.validTo||''}</td>`;tb.appendChild(tr);});}load();setInterval(load,10000);</script>"
+                        "</body></html>"
+                    )
+                    return self._send_html(html)
+                if self.path.startswith('/api/workers'):
+                    data = dashboard_context['db'].data.get('workers', [])
+                    return self._send_json(data)
+                if self.path.startswith('/api/status'):
+                    c = dashboard_context['controller']
+                    return self._send_json({
+                        'last_sync_started': c.last_sync_started,
+                        'last_sync_finished': c.last_sync_finished,
+                        'last_sync_error': c.last_sync_error,
+                        'count_workers': len(dashboard_context['db'].data.get('workers', []))
+                    })
+                self.send_response(404)
+                self.end_headers()
+        httpd = HTTPServer(('0.0.0.0', DASHBOARD_PORT), DashboardHandler)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        print(f"[Dashboard] Running on port {DASHBOARD_PORT}")
     
     # Run scheduler
     try:

@@ -22,6 +22,14 @@ if [ ! -f "$PROJECT_DIR/.env" ]; then
     exit 1
   fi
 fi
+
+# Ensure dashboard defaults
+if ! grep -q '^DASHBOARD_ENABLED=' "$PROJECT_DIR/.env"; then
+  echo 'DASHBOARD_ENABLED=True' >> "$PROJECT_DIR/.env"
+fi
+if ! grep -q '^DASHBOARD_PORT=' "$PROJECT_DIR/.env"; then
+  echo 'DASHBOARD_PORT=8080' >> "$PROJECT_DIR/.env"
+fi
 pip install --upgrade pip
 pip install requests schedule python-dotenv urllib3
 
@@ -55,3 +63,9 @@ systemctl restart "$SERVICE_NAME"
 systemctl status "$SERVICE_NAME" --no-pager -l || true
 
 echo "Deployed and started $SERVICE_NAME"
+
+if grep -q '^DASHBOARD_ENABLED=\s*True' "$PROJECT_DIR/.env"; then
+  PORT=$(grep -E '^DASHBOARD_PORT=' "$PROJECT_DIR/.env" | cut -d'=' -f2)
+  [ -z "$PORT" ] && PORT=8080
+  echo "Dashboard: http://$(hostname -I | awk '{print $1}'):$PORT/"
+fi
