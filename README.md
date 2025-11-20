@@ -44,6 +44,7 @@ HIKCENTRAL_INCLUDE_PORT_IN_URI=False
 استخدم سكريبت `deploy.sh` لتثبيت بيئة التشغيل والخدمة:
 
 1. جهّز ملف `.env` كما بالأعلى.
+   - لو `.env` غير موجود وملف `.env.example` موجود، السكريبت سينسخه تلقائياً إلى `.env`.
 2. نفّذ السكريبت كـ root:
    - `sudo bash deploy.sh`
 3. تحقق من حالة الخدمة:

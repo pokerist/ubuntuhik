@@ -11,8 +11,17 @@ fi
 if [ ! -d "$PROJECT_DIR/venv" ]; then
   python3 -m venv "$PROJECT_DIR/venv"
 fi
-
 . "$PROJECT_DIR/venv/bin/activate"
+
+if [ ! -f "$PROJECT_DIR/.env" ]; then
+  if [ -f "$PROJECT_DIR/.env.example" ]; then
+    cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
+    echo "Created .env from .env.example"
+  else
+    echo "Missing .env and .env.example"
+    exit 1
+  fi
+fi
 pip install --upgrade pip
 pip install requests schedule python-dotenv urllib3
 
