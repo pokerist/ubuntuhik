@@ -29,6 +29,7 @@ load_dotenv()
 
 # Configuration
 SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_EVENTS_PREFIX = os.getenv('SUPABASE_EVENTS_PREFIX')
 SUPABASE_BEARER_TOKEN = os.getenv('SUPABASE_BEARER_TOKEN')
 SUPABASE_API_KEY = os.getenv('SUPABASE_API_KEY')
 HIKCENTRAL_BASE_URL = os.getenv('HIKCENTRAL_BASE_URL')
@@ -404,43 +405,39 @@ class SupabaseAPI:
         self.base_url = SUPABASE_URL
         self.bearer_token = SUPABASE_BEARER_TOKEN
         self.api_key = SUPABASE_API_KEY
+        self.events_prefix = SUPABASE_EVENTS_PREFIX
     
     def _get_headers(self) -> Dict[str, str]:
-        return {
-            'Authorization': f'Bearer {self.bearer_token}',
-            'X-API-Key': self.api_key,
-            'Content-Type': 'application/json'
-        }
+        h = {'Content-Type': 'application/json'}
+        if self.api_key:
+            h['X-API-Key'] = self.api_key
+        if self.bearer_token:
+            h['Authorization'] = f'Bearer {self.bearer_token}'
+        return h
     
-    def get_workers(self) -> List[Dict]:
-        """Fetch workers from Supabase API"""
-        url = f"{self.base_url}/admin/workers/all-data"
-        
-        print(f"[Supabase] Fetching workers...")
-        
+    def get_pending_events(self, limit: int = 100, type_filter: Optional[str] = None) -> Dict:
+        if not self.events_prefix:
+            print('[Supabase] Missing SUPABASE_EVENTS_PREFIX')
+            return {'success': False, 'events': []}
+        url = f"{self.base_url}/{self.events_prefix}/admin/events/pending"
+        params = {}
+        if limit:
+            params['limit'] = limit
+        if type_filter:
+            params['type'] = type_filter
+        print(f"[Supabase] Fetching pending events...")
         try:
-            response = requests.get(
-                url,
-                headers=self._get_headers(),
-                timeout=30
-            )
+            response = requests.get(url, headers=self._get_headers(), params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
-            
             if data.get('success'):
-                workers = data.get('workers', [])
-                print(f"[Supabase] Fetched {len(workers)} workers")
-                print(f"  - New: {data.get('newWorkers', 0)}")
-                print(f"  - Pending: {data.get('pendingWorkers', 0)}")
-                print(f"  - Blocked: {data.get('blockedWorkers', 0)}")
-                return workers
-            
-            print(f"[Supabase] Error: {data}")
-            return []
-            
+                print(f"[Supabase] Received {data.get('count', 0)} new events, pending left: {data.get('totalPending', 0)}")
+            else:
+                print(f"[Supabase] Error: {data}")
+            return data
         except Exception as e:
-            print(f"[Supabase] Request failed: {e}")
-            return []
+            print(f"[Supabase] Events request failed: {e}")
+            return {'success': False, 'events': []}
     
     def update_worker_status(self, worker_id: str, status: str, external_id: Optional[str] = None, blocked_reason: Optional[str] = None) -> bool:
         """Update worker status in Supabase"""
@@ -520,6 +517,50 @@ class SyncController:
         self.last_sync_started = None
         self.last_sync_finished = None
         self.last_sync_error = None
+    
+    def _map_event_worker(self, ew: Dict) -> Dict:
+        return {
+            'id': ew.get('workerId'),
+            'nationalIdNumber': ew.get('nationalIdNumber'),
+            'fullName': ew.get('fullName'),
+            'status': ew.get('status', 'pending'),
+            'blocked': bool(ew.get('blocked', False)),
+            'blockedReason': ew.get('blockedReason'),
+            'facePhoto': ew.get('facePhoto'),
+            'nationalIdImage': ew.get('nationalIdImage'),
+            'unitNumber': (ew.get('unit') or {}).get('unitNumber'),
+            'delegatedUserMobile': (ew.get('delegatedUser') or {}).get('mobileNumber'),
+            'delegatedUserEmail': (ew.get('delegatedUser') or {}).get('email'),
+            'validFrom': None,
+            'validTo': None
+        }
+
+    def handle_event(self, event: Dict):
+        et = event.get('type')
+        workers = event.get('workers', [])
+        if et in ['worker.created', 'workers.bulk_created', 'worker.unblocked', 'unit.workers_unblocked']:
+            for ew in workers:
+                w = self._map_event_worker(ew)
+                w['blocked'] = False
+                self.process_worker(w)
+        elif et in ['worker.blocked', 'unit.workers_blocked']:
+            for ew in workers:
+                w = self._map_event_worker(ew)
+                w['blocked'] = True
+                self.process_worker(w)
+        elif et in ['worker.deleted', 'user.deleted_workers_deleted', 'user.expired_workers_deleted', 'worker.revoked']:
+            for ew in workers:
+                w = self._map_event_worker(ew)
+                existing = self.db.get_worker_by_national_id(w.get('nationalIdNumber') or '')
+                if existing and existing.get('hikcentral_id'):
+                    self.hikcentral.delete_person_full(existing['hikcentral_id'])
+                    self.db.update_worker_by_national_id(w['nationalIdNumber'], {
+                        'blocked': True,
+                        'hikcentral_deleted': True,
+                        'updated_at': datetime.now().isoformat()
+                    })
+        else:
+            pass
     
     def process_worker(self, worker: Dict):
         """Process a single worker"""
@@ -644,19 +685,16 @@ class SyncController:
         print(f"{'#'*60}\n")
         
         try:
-            # Fetch workers from Supabase
-            workers = self.supabase.get_workers()
-            
-            if not workers:
-                print("[Sync] No workers to process")
+            data = self.supabase.get_pending_events(limit=100)
+            events = data.get('events', []) if isinstance(data, dict) else []
+            if not events:
+                print("[Sync] No events to process")
                 return
-            
-            # Process each worker
-            for worker in workers:
+            for ev in events:
                 try:
-                    self.process_worker(worker)
+                    self.handle_event(ev)
                 except Exception as e:
-                    print(f"[Error] Failed to process worker: {e}")
+                    print(f"[Error] Failed to process event: {e}")
                     import traceback
                     traceback.print_exc()
             
@@ -681,8 +719,11 @@ def main():
     """)
     
     # Verify configuration
-    if not all([SUPABASE_URL, SUPABASE_BEARER_TOKEN, HIKCENTRAL_BASE_URL]):
-        print("[Error] Missing configuration! Please check your .env file")
+    if not SUPABASE_URL or not HIKCENTRAL_BASE_URL:
+        print("[Error] Missing SUPABASE_URL or HIKCENTRAL_BASE_URL in .env")
+        return
+    if not (SUPABASE_API_KEY or SUPABASE_BEARER_TOKEN):
+        print("[Error] Missing authentication: set SUPABASE_API_KEY or SUPABASE_BEARER_TOKEN in .env")
         return
     
     print(f"[Config] Supabase URL: {SUPABASE_URL[:50]}...")

@@ -19,6 +19,7 @@
 SUPABASE_URL=...
 SUPABASE_BEARER_TOKEN=...
 SUPABASE_API_KEY=...
+SUPABASE_EVENTS_PREFIX=make-server-2c3121a9
 
 # HikCentral
 HIKCENTRAL_BASE_URL=https://<ip-or-host>/artemis
@@ -62,6 +63,19 @@ HIKCENTRAL_INCLUDE_PORT_IN_URI=False
 
 ## التشغيل اليدوي (اختبار)
 - `python3 main.py`
+
+## استخدام Events API
+- النظام الآن يعتمد Polling لـ Events:
+  - يجلب الأحداث عبر `GET /{SUPABASE_EVENTS_PREFIX}/admin/events/pending?limit=100` مع رأس `X-API-Key`.
+  - السيرفر يعلِّم الأحداث كـ consumed قبل الإرجاع، لذا لن تُعاد نفس الأحداث.
+- المعالجة لكل نوع:
+  - `worker.created` و`workers.bulk_created`: إضافة/تحديث في HikCentral.
+  - `worker.blocked` و`unit.workers_blocked`: حذف مرة واحدة من HikCentral مع فلاغ محلي يمنع إعادة الحذف.
+  - `worker.unblocked` و`unit.workers_unblocked`: إعادة تفعيل أو تحديث.
+  - `worker.deleted` و`user.*_workers_deleted` و`worker.revoked`: حذف.
+- المصادقة:
+  - استخدم `SUPABASE_API_KEY` كرأس `X-API-Key`.
+  - يمكن استخدام `SUPABASE_BEARER_TOKEN` لأغراض الأدمن إن لزم.
 
 ## منطق المعالجة الذكي
 - جديد: إضافة الشخص في HikCentral + إضافة للمجموعة + تحديث Supabase Approved + حفظ محلي.
